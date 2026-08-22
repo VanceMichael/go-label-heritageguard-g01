@@ -267,3 +267,30 @@ func TestAssessmentJobPayloadRemainsStructured(t *testing.T) {
 		t.Fatalf("assessment job payload incomplete: %#v", decoded)
 	}
 }
+
+// TestAssessmentCancellationDoesNotEmitPartialGoDecision guards against the
+// regression where a cancellation arriving during the reading window was
+// stripped away, leaving a partial scan to be returned as a complete
+// go/no-go assessment. The cancelled context must surface as an error.
+func TestAssessmentCancellationDoesNotEmitPartialGoDecision(t *testing.T) {
+	store := exhibitionStore(t)
+	service := exhibitionService(store)
+	now := store.Now()
+	for index := 0; index < 5; index++ {
+		if _, err := service.RecordReading(context.Background(), "museum-demo", ReadingInput{
+			DisplayCaseID: "case-east-01", DeviceID: "device-cancel", Sequence: int64(index + 1),
+			TemperatureC: 20, Humidity: 50, ObservedAt: now.Add(time.Duration(index) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assessment, err := service.assessForTenant(ctx, "museum-demo", "case-east-01", 15*time.Minute)
+	if err == nil {
+		t.Fatalf("cancelled assessment must return an error, got ready=%v readings=%d", assessment.Ready, assessment.ReadingCount)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}

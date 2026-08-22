@@ -193,13 +193,11 @@ func (s *Service) assessForTenant(ctx context.Context, tenantID, caseID string, 
 		return domain.EnvironmentAssessment{}, domain.FieldError{Field: "window", Message: "must be between five minutes and thirty days"}
 	}
 	end := s.Now().UTC()
-	assessmentCtx := context.WithoutCancel(ctx)
-	if deadline, ok := ctx.Deadline(); ok {
-		var cancel context.CancelFunc
-		assessmentCtx, cancel = context.WithDeadline(assessmentCtx, deadline)
-		defer cancel()
-	}
-	return s.Cases.AssessEnvironment(assessmentCtx, tenantID, caseID, end.Add(-window), end)
+	// Propagate the caller's cancellation instead of detaching it. When the
+	// request is cancelled during the reading window, AssessEnvironment
+	// observes ctx.Err() while iterating and returns an error rather than
+	// surfacing partial readings as a complete go/no-go decision.
+	return s.Cases.AssessEnvironment(ctx, tenantID, caseID, end.Add(-window), end)
 }
 
 type IncidentInput struct {
