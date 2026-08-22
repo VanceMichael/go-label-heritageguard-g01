@@ -271,7 +271,8 @@ func scanIncident(row *sql.Row) (domain.Incident, error) {
 }
 
 func (s *Store) UpdateIncident(ctx context.Context, incident domain.Incident, expectedVersion int64) error {
-	result, err := s.DB.ExecContext(ctx, `
+	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
 			UPDATE incidents
 			SET status = ?, summary = ?, remediated = ?, closed_at = ?,
 			    version = version + 1, updated_at = ?
@@ -279,13 +280,12 @@ func (s *Store) UpdateIncident(ctx context.Context, incident domain.Incident, ex
 		`, incident.Status, incident.Summary, boolInt(incident.Remediated),
 			nullableTime(incident.ClosedAt), timeText(incident.UpdatedAt),
 			incident.TenantID, incident.ID, expectedVersion)
-	if err != nil {
-		return fmt.Errorf("update incident: %w", err)
-	}
-	if err := requireChanged(result, "incident", domain.ErrVersion); err != nil {
-		return err
-	}
-	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err != nil {
+			return fmt.Errorf("update incident: %w", err)
+		}
+		if err := requireChanged(result, "incident", domain.ErrVersion); err != nil {
+			return err
+		}
 		caseStatus := domain.CaseIncident
 		if incident.Status == domain.IncidentClosed {
 			caseStatus = domain.CaseActive
