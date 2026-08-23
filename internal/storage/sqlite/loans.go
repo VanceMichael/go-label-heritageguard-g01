@@ -200,7 +200,7 @@ func (s *Store) ApproveLoanAtomically(ctx context.Context, loan domain.LoanReque
 			UPDATE loan_requests
 			SET status = ?, approved_by = ?, version = version + 1, updated_at = ?
 			WHERE tenant_id = ? AND id = ? AND version = ? AND status = ?
-		`, domain.LoanApproved, loan.ApprovedBy, timeText(s.Now()), loan.TenantID,
+		`, domain.LoanApproved, nullableString(loan.ApprovedBy), timeText(s.Now()), loan.TenantID,
 			loan.ID, expectedLoanVersion, domain.LoanSubmitted)
 		if err != nil {
 			return fmt.Errorf("approve loan: %w", err)
@@ -210,9 +210,9 @@ func (s *Store) ApproveLoanAtomically(ctx context.Context, loan domain.LoanReque
 		}
 		artifactResult, err := tx.ExecContext(ctx, `
 			UPDATE artifacts SET active_loan_id = ?, version = version + 1, updated_at = ?
-			WHERE tenant_id = ? AND id = ? AND status = ?
+			WHERE tenant_id = ? AND id = ? AND version = ? AND status = ? AND active_loan_id IS NULL
 		`, loan.ID, timeText(s.Now()), artifact.TenantID, artifact.ID,
-			domain.ArtifactReady)
+			expectedArtifactVersion, domain.ArtifactReady)
 		if err != nil {
 			return fmt.Errorf("reserve artifact for loan: %w", err)
 		}

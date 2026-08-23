@@ -279,6 +279,72 @@ func TestOutboxLeaseFailureRetryAndSuccessSurvivePersistence(t *testing.T) {
 	}
 }
 
+func TestConcurrentLoanApprovalReservesArtifactOnce(t *testing.T) {
+	store := integrationStore(t, filepath.Join(t.TempDir(), "approve.db"), 8)
+	supervisor := fixtureUser(t, store, "supervisor-concurrent", domain.RoleSupervisor)
+	artifact := fixtureArtifact(t, store, "artifact-concurrent", domain.ArtifactReady)
+	now := integrationNow()
+	// Two non-overlapping loan windows so both pass the overlap precondition individually.
+	loanA := domain.LoanRequest{ID: "loan-concurrent-a", TenantID: artifact.TenantID, ArtifactID: artifact.ID,
+		Borrower: "Museum A", Purpose: "Exhibition A", StartAt: now.Add(24 * time.Hour), EndAt: now.Add(48 * time.Hour),
+		Status: domain.LoanSubmitted, Version: 1, CreatedBy: supervisor.ID, CreatedAt: now, UpdatedAt: now}
+	loanB := domain.LoanRequest{ID: "loan-concurrent-b", TenantID: artifact.TenantID, ArtifactID: artifact.ID,
+		Borrower: "Museum B", Purpose: "Exhibition B", StartAt: now.Add(72 * time.Hour), EndAt: now.Add(96 * time.Hour),
+		Status: domain.LoanSubmitted, Version: 1, CreatedBy: supervisor.ID, CreatedAt: now, UpdatedAt: now}
+	for _, item := range []domain.LoanRequest{loanA, loanB} {
+		if err := store.CreateLoan(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeAudit := func(loan domain.LoanRequest) domain.AuditEvent {
+		return domain.AuditEvent{ID: "audit-" + loan.ID, TenantID: loan.TenantID, ActorID: supervisor.ID,
+			Action: "loan.approve", ObjectType: "loan_request", ObjectID: loan.ID, Result: "success",
+			RequestID: "request-" + loan.ID, Details: []byte(`{}`), CreatedAt: now}
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for _, loan := range []domain.LoanRequest{loanA, loanB} {
+		loan := loan
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- store.ApproveLoanAtomically(context.Background(), loan, artifact, makeAudit(loan), loan.Version, artifact.Version)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var failures, successes int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrVersion):
+			failures++
+		case containsAny(err.Error(), "locked", "SQLITE_BUSY"):
+			failures++
+		default:
+			t.Fatalf("unexpected approval error: %v", err)
+		}
+	}
+	if successes != 1 || failures != 1 {
+		t.Fatalf("expected one approval and one loser, got successes=%d failures=%d", successes, failures)
+	}
+	loaded, err := store.GetArtifact(context.Background(), artifact.TenantID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ActiveLoanID != loanA.ID && loaded.ActiveLoanID != loanB.ID {
+		t.Fatalf("artifact bound to unexpected loan: %s", loaded.ActiveLoanID)
+	}
+	var approvedCount int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM loan_requests WHERE artifact_id = ? AND status = ?`, artifact.ID, domain.LoanApproved).Scan(&approvedCount); err != nil {
+		t.Fatal(err)
+	}
+	if approvedCount != 1 {
+		t.Fatalf("expected exactly one approved loan, got %d", approvedCount)
+	}
+}
+
 func TestCancelledTransactionDoesNotCommit(t *testing.T) {
 	store := integrationStore(t, ":memory:", 1)
 	ctx, cancel := context.WithCancel(context.Background())
