@@ -144,14 +144,17 @@ func (s *Service) Authenticate(ctx context.Context, token string) (domain.Princi
 	if !s.Now().Before(session.ExpiresAt) {
 		return domain.Principal{}, domain.ErrExpired
 	}
-	lookupCtx := context.WithoutCancel(ctx)
-	if deadline, ok := ctx.Deadline(); ok {
-		var cancel context.CancelFunc
-		lookupCtx, cancel = context.WithDeadline(lookupCtx, deadline)
-		defer cancel()
+	// Honor cancellation that arrived after the session loaded so a client
+	// that went away mid-authentication never accesses user data or returns a principal.
+	if err := ctx.Err(); err != nil {
+		return domain.Principal{}, err
 	}
-	user, err := s.Users.FindUser(lookupCtx, session.TenantID, session.UserID)
+	user, err := s.Users.FindUser(ctx, session.TenantID, session.UserID)
 	if err != nil {
+		// Do not mask client cancellation as a lookup failure.
+		if cerr := ctx.Err(); cerr != nil {
+			return domain.Principal{}, cerr
+		}
 		return domain.Principal{}, fmt.Errorf("find session user: %w", err)
 	}
 	if !user.Active {

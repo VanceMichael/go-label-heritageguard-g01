@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VanceMichael/go-base-heritageguard-g01/internal/domain"
+	"github.com/VanceMichael/go-base-heritageguard-g01/internal/repository"
 	"github.com/VanceMichael/go-base-heritageguard-g01/internal/service"
 	"github.com/VanceMichael/go-base-heritageguard-g01/internal/storage/sqlite"
 )
@@ -188,5 +189,73 @@ func TestAuthenticationHonorsContextCancellation(t *testing.T) {
 	}
 	if _, err := service.Authenticate(ctx, "token"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancelled authentication, got %v", err)
+	}
+}
+
+// cancellationSpySessions returns a valid session and then cancels the caller
+// context, simulating a request that goes away after the session loaded but
+// before the principal is resolved.
+type cancellationSpySessions struct {
+	store    repository.SessionRepository
+	onLookup func(ctx context.Context)
+	called   bool
+}
+
+func (s *cancellationSpySessions) CreateSession(ctx context.Context, session domain.Session) error {
+	return s.store.CreateSession(ctx, session)
+}
+
+func (s *cancellationSpySessions) FindSessionByToken(ctx context.Context, tokenHash []byte) (domain.Session, error) {
+	session, err := s.store.FindSessionByToken(ctx, tokenHash)
+	if err == nil && !s.called {
+		s.called = true
+		s.onLookup(ctx)
+	}
+	return session, err
+}
+
+func (s *cancellationSpySessions) RevokeSession(ctx context.Context, tenantID, sessionID string, at time.Time) error {
+	return s.store.RevokeSession(ctx, tenantID, sessionID, at)
+}
+
+func (s *cancellationSpySessions) RevokeUserSessions(ctx context.Context, tenantID, userID string, at time.Time) error {
+	return s.store.RevokeUserSessions(ctx, tenantID, userID, at)
+}
+
+// userAccessSpy records whether the user store was reached after cancellation.
+type userAccessSpy struct {
+	repository.UserRepository
+	accessed bool
+}
+
+func (u *userAccessSpy) FindUser(ctx context.Context, tenantID, id string) (domain.User, error) {
+	u.accessed = true
+	return u.UserRepository.FindUser(ctx, tenantID, id)
+}
+
+func TestAuthenticateStopsOnCancellationAfterSessionLoads(t *testing.T) {
+	store := authStore(t)
+	user := seedAuthUser(t, store, "registrar", domain.RoleRegistrar, true)
+	authService := newAuthService(store)
+
+	login, err := authService.Login(context.Background(), LoginInput{TenantID: user.TenantID, Email: user.Email, Password: "a-valid-password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	spy := &userAccessSpy{UserRepository: store}
+	authService.Users = spy
+	authService.Sessions = &cancellationSpySessions{
+		store:    store,
+		onLookup: func(_ context.Context) { cancel() },
+	}
+
+	_, err = authService.Authenticate(ctx, login.Token)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancelled authentication after session load, got %v", err)
+	}
+	if spy.accessed {
+		t.Fatal("user data must not be accessed once the request was cancelled")
 	}
 }
