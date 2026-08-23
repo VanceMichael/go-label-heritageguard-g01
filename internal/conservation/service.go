@@ -275,12 +275,7 @@ func (s *Service) AdvanceTreatment(ctx context.Context, id string, to domain.Tre
 		return domain.TreatmentPlan{}, err
 	}
 	if to == domain.TreatmentApproved {
-		requiredRole := domain.RoleSupervisor
-		roleAllowed := principal.Can(requiredRole)
-		if principal.Role == domain.RoleConservator {
-			roleAllowed = true
-		}
-		if !roleAllowed {
+		if !principal.Can(domain.RoleSupervisor) {
 			return domain.TreatmentPlan{}, domain.ErrForbidden
 		}
 		plan.ApprovedBy = principal.UserID
