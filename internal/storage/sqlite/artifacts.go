@@ -15,18 +15,16 @@ status, current_zone_id, current_case_id, active_loan_id, last_report_id,
 version, created_at, updated_at`
 
 func (s *Store) CreateArtifact(ctx context.Context, artifact domain.Artifact, report domain.ConditionReport, custody domain.CustodyEvent, audit domain.AuditEvent) error {
-	if err := s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := insertArtifact(ctx, tx, artifact); err != nil {
 			return err
 		}
 		if err := insertConditionReport(ctx, tx, report); err != nil {
 			return err
 		}
-		return insertCustody(ctx, tx, custody)
-	}); err != nil {
-		return err
-	}
-	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := insertCustody(ctx, tx, custody); err != nil {
+			return err
+		}
 		if err := insertAudit(ctx, tx, audit); err != nil {
 			return err
 		}
@@ -37,10 +35,7 @@ func (s *Store) CreateArtifact(ctx context.Context, artifact domain.Artifact, re
 		if err != nil {
 			return fmt.Errorf("link initial condition report: %w", err)
 		}
-		if err := requireChanged(result, "artifact", domain.ErrVersion); err != nil {
-			return err
-		}
-		return nil
+		return requireChanged(result, "artifact", domain.ErrVersion)
 	})
 }
 
