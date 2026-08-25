@@ -142,8 +142,7 @@ func (s *Store) GetTreatmentPlan(ctx context.Context, tenantID, id string) (doma
 }
 
 func (s *Store) UpdateTreatment(ctx context.Context, plan domain.TreatmentPlan, expectedVersion int64) error {
-	finishSeparately := plan.Status == domain.TreatmentCompleted
-	err := s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `
 			UPDATE treatment_plans
 			SET status = ?, evidence_uri = ?, approved_by = ?, completed_at = ?,
@@ -169,18 +168,15 @@ func (s *Store) UpdateTreatment(ctx context.Context, plan domain.TreatmentPlan, 
 			if stringsTrim(plan.EvidenceURI) == "" {
 				return fmt.Errorf("complete treatment without evidence: %w", domain.ErrPrecondition)
 			}
+			// Resolve the quarantine, release its zone capacity, and restore the
+			// artifact within the same transaction as the plan update. If any of
+			// these fail, the plan status must not be left marked completed.
+			if err := s.finishTreatmentTx(ctx, tx, plan); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	if finishSeparately {
-		return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			return s.finishTreatmentTx(ctx, tx, plan)
-		})
-	}
-	return nil
 }
 
 func (s *Store) finishTreatmentTx(ctx context.Context, tx *sql.Tx, plan domain.TreatmentPlan) error {

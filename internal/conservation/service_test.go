@@ -2,6 +2,7 @@ package conservation
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"testing"
@@ -203,6 +204,63 @@ func TestTreatmentApprovalExecutionAndCompletionRestoresArtifact(t *testing.T) {
 	}
 	if occupied != 0 {
 		t.Fatalf("quarantine capacity was not released: %d", occupied)
+	}
+}
+
+func TestCompletionRollsBackPlanWhenQuarantineCannotBeReleased(t *testing.T) {
+	store := conservationStore(t)
+	registrar := conservationUser(t, store, "registrar", domain.RoleRegistrar)
+	conservator := conservationUser(t, store, "conservator", domain.RoleConservator)
+	supervisor := conservationUser(t, store, "supervisor", domain.RoleSupervisor)
+	conservation := conservationService(store)
+	registered, err := conservation.Register(conservationContext(registrar), RegisterArtifactInput{
+		AccessionNo: "HG-004", Name: "Lacquered screen", Material: "wood", Period: "Song",
+		RiskClass: domain.RiskCritical, InitialZoneID: "zone-paper", Summary: "delamination",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quarantine, err := conservation.OpenQuarantine(conservationContext(conservator), QuarantineInput{
+		ArtifactID: registered.Artifact.ID, ZoneID: "zone-paper", Reason: "delamination",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := conservation.DraftTreatment(conservationContext(conservator), TreatmentInput{
+		ArtifactID: registered.Artifact.ID, QuarantineID: quarantine.ID, Procedure: "consolidation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conservation.AdvanceTreatment(conservationContext(supervisor), plan.ID, domain.TreatmentApproved, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conservation.AdvanceTreatment(conservationContext(conservator), plan.ID, domain.TreatmentInProgress, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a release/recovery failure: the quarantine is no longer in a
+	// state finishTreatmentTx can resolve, so the whole completion must abort.
+	if _, err := store.DB.Exec(`UPDATE quarantine_cases SET status = ? WHERE id = ?`,
+		domain.QuarantineResolved, quarantine.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conservation.AdvanceTreatment(conservationContext(conservator), plan.ID,
+		domain.TreatmentCompleted, "s3://evidence/hg-004/report.pdf"); !errors.Is(err, domain.ErrPrecondition) {
+		t.Fatalf("expected completion to fail when release is impossible, got %v", err)
+	}
+	var planStatus string
+	if err := store.DB.QueryRow(`SELECT status FROM treatment_plans WHERE id = ?`, plan.ID).Scan(&planStatus); err != nil {
+		t.Fatal(err)
+	}
+	if planStatus != string(domain.TreatmentInProgress) {
+		t.Fatalf("plan must not be marked completed when release failed: %s", planStatus)
+	}
+	var completedAt sql.NullString
+	if err := store.DB.QueryRow(`SELECT completed_at FROM treatment_plans WHERE id = ?`, plan.ID).Scan(&completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if completedAt.Valid {
+		t.Fatalf("plan completed_at must be cleared when release failed: %s", completedAt.String)
 	}
 }
 
