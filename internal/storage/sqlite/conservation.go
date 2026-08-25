@@ -10,19 +10,19 @@ import (
 )
 
 func (s *Store) OpenQuarantine(ctx context.Context, quarantine domain.QuarantineCase, artifact domain.Artifact, expectedVersion int64) error {
-	zoneResult, err := s.DB.ExecContext(ctx, `
-			UPDATE quarantine_zones
-			SET occupied = occupied + 1, version = version + 1
-			WHERE tenant_id = ? AND id = ? AND active = 1 AND occupied < capacity
-		`, quarantine.TenantID, quarantine.ZoneID)
-	if err != nil {
-		return fmt.Errorf("reserve quarantine zone: %w", err)
-	}
-	if err := requireChanged(zoneResult, "quarantine zone", domain.ErrCapacity); err != nil {
-		return err
-	}
 	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `
+		zoneResult, err := tx.ExecContext(ctx, `
+				UPDATE quarantine_zones
+				SET occupied = occupied + 1, version = version + 1
+				WHERE tenant_id = ? AND id = ? AND active = 1 AND occupied < capacity
+			`, quarantine.TenantID, quarantine.ZoneID)
+		if err != nil {
+			return fmt.Errorf("reserve quarantine zone: %w", err)
+		}
+		if err := requireChanged(zoneResult, "quarantine zone", domain.ErrCapacity); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO quarantine_cases(
 				id, tenant_id, artifact_id, zone_id, reason, status,
 				opened_by, resolved_by, version, opened_at, resolved_at

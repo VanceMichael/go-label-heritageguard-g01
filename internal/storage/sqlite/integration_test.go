@@ -200,6 +200,53 @@ func TestQuarantineCapacityIsAtomic(t *testing.T) {
 	}
 }
 
+func TestOpenQuarantineRollsBackZoneAndArtifactOnInsertFailure(t *testing.T) {
+	store := integrationStore(t, ":memory:", 1)
+	conservator := fixtureUser(t, store, "conservator-1", domain.RoleConservator)
+	artifact := fixtureArtifact(t, store, "artifact-rollback-q", domain.ArtifactReady)
+	makeCase := func(id string) domain.QuarantineCase {
+		return domain.QuarantineCase{ID: id, TenantID: artifact.TenantID, ArtifactID: artifact.ID, ZoneID: "zone-general",
+			Reason: "pigment loss", Status: domain.QuarantineOpen, OpenedBy: conservator.ID, Version: 1, OpenedAt: integrationNow()}
+	}
+	if err := store.OpenQuarantine(context.Background(), makeCase("q-original"), artifact, artifact.Version); err != nil {
+		t.Fatal(err)
+	}
+	beforeZone, err := store.GetArtifact(context.Background(), artifact.TenantID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeZone.Status != domain.ArtifactQuarantined {
+		t.Fatalf("artifact not quarantined: %#v", beforeZone)
+	}
+	// A duplicate quarantine for the same artifact must be rejected by the unique-active index,
+	// and the zone reservation made by this failed attempt must roll back together.
+	if err := store.OpenQuarantine(context.Background(), makeCase("q-duplicate"), artifact, artifact.Version); !errors.Is(err, domain.ErrAlreadyExists) {
+		t.Fatalf("expected duplicate quarantine failure, got %v", err)
+	}
+	var occupied int
+	if err := store.DB.QueryRow(`SELECT occupied FROM quarantine_zones WHERE id = 'zone-general'`).Scan(&occupied); err != nil {
+		t.Fatal(err)
+	}
+	if occupied != 1 {
+		t.Fatalf("failed quarantine did not roll back zone capacity: %d", occupied)
+	}
+	var caseCount int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM quarantine_cases WHERE artifact_id = ?`, artifact.ID).Scan(&caseCount); err != nil {
+		t.Fatal(err)
+	}
+	if caseCount != 1 {
+		t.Fatalf("failed quarantine left a partial quarantine case: %d", caseCount)
+	}
+	// The original quarantine still owns the artifact, so a safe retry is still possible after the failed attempt.
+	current, err := store.GetArtifact(context.Background(), artifact.TenantID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != domain.ArtifactQuarantined || current.CurrentCaseID != "q-original" {
+		t.Fatalf("failed quarantine corrupted artifact state: %#v", current)
+	}
+}
+
 func TestWorkerClaimIsSingleOwnerUnderConcurrency(t *testing.T) {
 	store := integrationStore(t, filepath.Join(t.TempDir(), "claim.db"), 8)
 	now := integrationNow()
