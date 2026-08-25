@@ -301,9 +301,9 @@ func (s *Service) AdvanceTreatment(ctx context.Context, id string, to domain.Tre
 }
 
 func cloneMap(input map[string]float64) map[string]float64 {
-	output := input
-	if output == nil {
-		output = make(map[string]float64)
+	output := make(map[string]float64, len(input))
+	for key, value := range input {
+		output[key] = value
 	}
 	return output
 }
