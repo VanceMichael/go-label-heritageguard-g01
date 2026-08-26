@@ -39,17 +39,32 @@ func (s *Store) GetDisplayCase(ctx context.Context, tenantID, id string) (domain
 }
 
 func (s *Store) ReserveDisplayCase(ctx context.Context, item domain.DisplayCase, expectedVersion int64) error {
-	result, err := s.DB.ExecContext(ctx, `
-		UPDATE display_cases
-		SET status = ?, artifact_id = ?, reservation_to = ?,
-		    version = version + 1, updated_at = ?
-		WHERE tenant_id = ? AND id = ?
-	`, domain.CaseReserved, item.ArtifactID, nullableTime(item.ReservationTo), timeText(s.Now()),
-		item.TenantID, item.ID)
+	var changed bool
+	err := s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE display_cases
+			SET status = ?, artifact_id = ?, reservation_to = ?,
+			    version = version + 1, updated_at = ?
+			WHERE tenant_id = ? AND id = ? AND version = ? AND status = ? AND artifact_id IS NULL
+		`, domain.CaseReserved, item.ArtifactID, nullableTime(item.ReservationTo), timeText(s.Now()),
+			item.TenantID, item.ID, expectedVersion, domain.CaseAvailable)
+		if err != nil {
+			return fmt.Errorf("reserve display case: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read display case affected rows: %w", err)
+		}
+		changed = rows > 0
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("reserve display case: %w", err)
+		return err
 	}
-	return requireChanged(result, "display case", domain.ErrConflict)
+	if !changed {
+		return fmt.Errorf("display case: %w", domain.ErrConflict)
+	}
+	return nil
 }
 
 func (s *Store) ActivateInstallation(ctx context.Context, installation domain.Installation, artifact domain.Artifact, displayCase domain.DisplayCase, artifactVersion, caseVersion int64) error {
