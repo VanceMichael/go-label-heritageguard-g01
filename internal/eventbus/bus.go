@@ -97,15 +97,9 @@ func (b *Bus) Publish(ctx context.Context, event Event) error {
 	}
 	b.mu.RUnlock()
 	for _, sub := range targets {
-		publishCtx := context.WithoutCancel(ctx)
-		if deadline, ok := ctx.Deadline(); ok {
-			var cancel context.CancelFunc
-			publishCtx, cancel = context.WithDeadline(publishCtx, deadline)
-			defer cancel()
-		}
 		select {
-		case <-publishCtx.Done():
-			return publishCtx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-sub.done:
 			continue
 		case sub.events <- event.Clone():

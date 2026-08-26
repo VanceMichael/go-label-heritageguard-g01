@@ -54,6 +54,26 @@ func TestBusPublishHonorsCancellationAndClose(t *testing.T) {
 	subscription.Close()
 }
 
+func TestBusPublishUnblocksCancelledWorkerOnFullSubscription(t *testing.T) {
+	bus := New()
+	defer bus.Close()
+	if _, err := bus.Subscribe("full", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.Publish(context.Background(), Event{Topic: "full", Body: []byte("fill")}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	err := bus.Publish(ctx, Event{Topic: "full", Body: []byte("overflow")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled publish on full subscription, got %v", err)
+	}
+}
+
 func TestBusValidation(t *testing.T) {
 	bus := New()
 	defer bus.Close()
