@@ -196,17 +196,17 @@ func (s *Store) RevokeUserSessions(ctx context.Context, tenantID, userID string,
 }
 
 func (s *Store) DeactivateUserAndSessions(ctx context.Context, actor domain.Principal, target domain.User, requestID string) error {
-	result, err := s.DB.ExecContext(ctx, `
+	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
 			UPDATE users SET active = 0, version = version + 1, updated_at = ?
 			WHERE tenant_id = ? AND id = ? AND version = ? AND active = 1
 		`, timeText(s.Now()), target.TenantID, target.ID, target.Version)
-	if err != nil {
-		return fmt.Errorf("deactivate user: %w", err)
-	}
-	if err := requireChanged(result, "user", domain.ErrVersion); err != nil {
-		return err
-	}
-	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err != nil {
+			return fmt.Errorf("deactivate user: %w", err)
+		}
+		if err := requireChanged(result, "user", domain.ErrVersion); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET revoked_at = ?
 			WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL

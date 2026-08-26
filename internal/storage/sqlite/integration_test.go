@@ -325,3 +325,46 @@ func TestCredentialAndTokenPersistence(t *testing.T) {
 		t.Fatal("revoked session lost revocation timestamp")
 	}
 }
+
+func TestDeactivateUserAndSessionsRollsBackWhenAuditWriteFails(t *testing.T) {
+	store := integrationStore(t, ":memory:", 1)
+	supervisor := fixtureUser(t, store, "supervisor-deact", domain.RoleSupervisor)
+	target := fixtureUser(t, store, "target-deact", domain.RoleRegistrar)
+	session := domain.Session{ID: "session-deact", TenantID: target.TenantID, UserID: target.ID,
+		TokenHash: auth.HashToken("target-session"), ExpiresAt: integrationNow().Add(time.Hour), CreatedAt: integrationNow()}
+	if err := store.CreateSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`CREATE TRIGGER audit_block BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	actor := domain.Principal{TenantID: supervisor.TenantID, UserID: supervisor.ID, Role: supervisor.Role}
+	err := store.DeactivateUserAndSessions(context.Background(), actor, target, "request-deact")
+	if err == nil {
+		t.Fatal("expected audit failure to abort deactivation")
+	}
+	if !containsAny(err.Error(), "audit unavailable", "insert audit event") {
+		t.Fatalf("expected audit write error, got %v", err)
+	}
+	loaded, err := store.FindUser(context.Background(), target.TenantID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Active || loaded.Version != target.Version {
+		t.Fatalf("user was left half-deactivated: active=%v version=%d", loaded.Active, loaded.Version)
+	}
+	sessions, err := store.ListActiveSessions(context.Background(), target.TenantID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != session.ID {
+		t.Fatalf("target session was left half-revoked: %#v", sessions)
+	}
+	audit, err := store.List(context.Background(), target.TenantID, target.ID, domain.Page{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit) != 0 {
+		t.Fatalf("deactivation audit should not persist on failure: %#v", audit)
+	}
+}
