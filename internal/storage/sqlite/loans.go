@@ -104,11 +104,11 @@ func (s *Store) ListOverlappingLoans(ctx context.Context, tenantID, artifactID s
 		SELECT `+loanColumns+`
 		FROM loan_requests
 		WHERE tenant_id = ? AND artifact_id = ?
-		  AND status IN (?, ?, ?, ?)
+		  AND status IN (?, ?, ?, ?, ?, ?)
 		  AND start_at < ? AND ? < end_at
 		ORDER BY start_at, id
 	`, tenantID, artifactID, domain.LoanSubmitted, domain.LoanApproved,
-		domain.LoanPacked, domain.LoanDispatched,
+		domain.LoanPacked, domain.LoanDispatched, domain.LoanReturning, domain.LoanReturned,
 		timeText(end), timeText(start))
 	if err != nil {
 		return nil, fmt.Errorf("list overlapping loans: %w", err)
@@ -186,10 +186,10 @@ func (s *Store) ApproveLoanAtomically(ctx context.Context, loan domain.LoanReque
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM loan_requests
 			WHERE tenant_id = ? AND artifact_id = ? AND id != ?
-			  AND status IN (?, ?, ?, ?, ?) AND start_at < ? AND ? < end_at
+			  AND status IN (?, ?, ?, ?, ?, ?) AND start_at < ? AND ? < end_at
 		`, loan.TenantID, loan.ArtifactID, loan.ID,
 			domain.LoanSubmitted, domain.LoanApproved, domain.LoanPacked,
-			domain.LoanDispatched, domain.LoanReturning,
+			domain.LoanDispatched, domain.LoanReturning, domain.LoanReturned,
 			timeText(loan.EndAt), timeText(loan.StartAt)).Scan(&overlaps); err != nil {
 			return fmt.Errorf("check overlapping loans: %w", err)
 		}

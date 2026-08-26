@@ -231,3 +231,43 @@ func TestCustodyTransitionRequiresOrderedPhasesAndRequiredLocation(t *testing.T)
 		t.Fatalf("missing location should fail, got %v", err)
 	}
 }
+
+func TestLoanRejectsOverlappingApplicationDuringReturnHandover(t *testing.T) {
+	store := loanStore(t)
+	registrar := loanUser(t, store, "registrar", domain.RoleRegistrar)
+	coordinator := loanUser(t, store, "coordinator", domain.RoleCoordinator)
+	supervisor := loanUser(t, store, "supervisor", domain.RoleSupervisor)
+	artifact := loanArtifact(t, store, "artifact-loan")
+	service := loanService(store)
+	start, end := loanPeriod(store)
+
+	first, err := service.Create(loanContext(registrar), CreateInput{ArtifactID: artifact.ID, Borrower: "Museum A", Purpose: "Exhibition A", StartAt: start, EndAt: end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Submit(loanContext(registrar), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(loanContext(supervisor), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Walk the loan through the full return handover (packed -> dispatched -> returning -> returned).
+	for _, kind := range []string{"packed", "dispatched", "returning", "returned"} {
+		if _, err := service.RecordCustody(loanContext(coordinator), CustodyInput{LoanID: first.ID, FromHolder: "a", ToHolder: "b", Location: "dock", SealNumber: "S", Kind: kind}); err != nil {
+			t.Fatalf("custody %s: %v", kind, err)
+		}
+	}
+	// The returned artifact is back in assessment; release it to ready so the loan is the only lingering commitment.
+	if _, err := store.DB.Exec(`UPDATE artifacts SET status = 'ready', version = version + 1, updated_at = ? WHERE id = ?`, store.Now().Format(time.RFC3339Nano), artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A new application whose window overlaps the just-returned loan must be rejected during the handover window.
+	if _, err := service.Create(loanContext(registrar), CreateInput{ArtifactID: artifact.ID, Borrower: "Museum B", Purpose: "Exhibition B", StartAt: start.Add(time.Hour), EndAt: end.Add(time.Hour)}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("overlapping application during return handover should fail, got %v", err)
+	}
+	// A later, non-overlapping application in the freed slot is allowed once the window no longer overlaps.
+	laterStart := end.Add(time.Hour)
+	if _, err := service.Create(loanContext(registrar), CreateInput{ArtifactID: artifact.ID, Borrower: "Museum C", Purpose: "Exhibition C", StartAt: laterStart, EndAt: laterStart.Add(24 * time.Hour)}); err != nil {
+		t.Fatalf("non-overlapping application after handover should succeed, got %v", err)
+	}
+}
