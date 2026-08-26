@@ -53,21 +53,20 @@ func (s *Store) ReserveDisplayCase(ctx context.Context, item domain.DisplayCase,
 }
 
 func (s *Store) ActivateInstallation(ctx context.Context, installation domain.Installation, artifact domain.Artifact, displayCase domain.DisplayCase, artifactVersion, caseVersion int64) error {
-	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO installations(
-			id, tenant_id, artifact_id, display_case_id, mount_verified,
-			seal_verified, environment_ready, installed_by, installed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, installation.ID, installation.TenantID, installation.ArtifactID,
-		installation.DisplayCaseID, boolInt(installation.MountVerified),
-		boolInt(installation.SealVerified), boolInt(installation.EnvironmentReady),
-		installation.InstalledBy, timeText(installation.InstalledAt))
-	if err != nil {
-		return fmt.Errorf("insert installation: %w", err)
-	}
 	return s.WithTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if !installation.Complete() {
 			return fmt.Errorf("activate installation: %w", domain.ErrPrecondition)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO installations(
+				id, tenant_id, artifact_id, display_case_id, mount_verified,
+				seal_verified, environment_ready, installed_by, installed_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, installation.ID, installation.TenantID, installation.ArtifactID,
+			installation.DisplayCaseID, boolInt(installation.MountVerified),
+			boolInt(installation.SealVerified), boolInt(installation.EnvironmentReady),
+			installation.InstalledBy, timeText(installation.InstalledAt)); err != nil {
+			return fmt.Errorf("insert installation: %w", err)
 		}
 		caseResult, err := tx.ExecContext(ctx, `
 			UPDATE display_cases
