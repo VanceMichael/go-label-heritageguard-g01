@@ -105,7 +105,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, err
 	}
 	token, err := s.Tokens.NewToken()
 	if err != nil {
-		return LoginResult{}, err
+		return LoginResult{}, fmt.Errorf("issue login token: %w", normalizeCredentialError(err))
 	}
 	now := s.Now().UTC()
 	expiresAt := now.Add(s.SessionTTL)
@@ -118,7 +118,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, err
 		CreatedAt: now,
 	}
 	if err := s.Sessions.CreateSession(ctx, session); err != nil {
-		return LoginResult{}, fmt.Errorf("persist login session: %w", err)
+		return LoginResult{}, fmt.Errorf("persist login session: %w", normalizeCredentialError(err))
 	}
 	return LoginResult{
 		Token:     token,
@@ -149,7 +149,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (domain.Princi
 	}
 	user, err := s.Users.FindUser(ctx, session.TenantID, session.UserID)
 	if err != nil {
-		return domain.Principal{}, fmt.Errorf("find session user: %w", err)
+		return domain.Principal{}, fmt.Errorf("find session user: %w", normalizeCredentialError(err))
 	}
 	if !user.Active {
 		return domain.Principal{}, domain.ErrForbidden
@@ -220,15 +220,11 @@ func normalizeCredentialError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, domain.ErrUnavailable) {
+		return err
+	}
 	if errors.Is(err, domain.ErrNotFound) {
 		return domain.ErrUnauthorized
-	}
-	if errors.Is(err, domain.ErrUnavailable) {
-		message := strings.TrimSpace(err.Error())
-		if message == "" {
-			return domain.ErrUnavailable
-		}
-		return errors.New(message)
 	}
 	return err
 }
